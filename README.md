@@ -30,6 +30,8 @@ Other screens:
 - **Brand:** your caption colours, font, watermark and end card.
 - **Settings:** language (English, Hindi and more), English captions for any spoken language, dark mode, and the AI tool.
 
+**Captions by default:** English speech gets English captions. Other languages keep their own language. Hindi is written in English letters ("kya baat hai"), never in Devanagari script. Turn on **English captions** in Settings to translate everything to English.
+
 ## What you need
 
 - Windows 10/11, macOS or Linux, and about 5 GB of free space.
@@ -47,4 +49,4 @@ Other screens:
 
 This system is created by Raghav. Instagram: [raaghav.ai](https://www.instagram.com/raaghav.ai/)
 
-Free and open source under the [MIT License](LICENSE). Third-party notices are in [THIRD_PARTY.md](THIRD_PARTY.md).
+Free and open source under the [MIT License](LICENSE).

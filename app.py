@@ -516,8 +516,9 @@ def start_job(kind, cmd, envx=None, dry=False, cwd=None, stdin=None, label=""):
     JOBS[jid] = dict(id=jid, kind=kind, label=label, status="running", log=[], t=time.time(), dry=dry)
     threading.Thread(target=run_job, args=(jid, cmd, envx or {}, dry, cwd, stdin), daemon=True).start(); return jid
 
-def cap_env():  # transcribe.py reads TRANSCRIBE_TASK; every run and hunt started by this app inherits it. Captions are always English (owner, 20 Nov: never Hindi)
-    os.environ["TRANSCRIBE_TASK"] = "translate"
+def cap_env():  # transcribe.py reads TRANSCRIBE_TASK; every run and hunt started by this app inherits it. Default: captions in the spoken language (Hindi in English letters); the Settings switch makes them English
+    if env().get("CAPTIONS_ENGLISH") == "1": os.environ["TRANSCRIBE_TASK"] = "translate"
+    else: os.environ.pop("TRANSCRIBE_TASK", None)
 def peek_file(rid, file):
     run_file(rid, file); p = run_dir(rid).parent / "peek" / (file[3:-4] + ".jpg")
     return p if p.is_file() and WS in p.resolve().parents else None
@@ -812,9 +813,9 @@ def api56(method, path, q, d):  # -> (code, json) or None when the route is not 
             if d.get("lang") not in LANGS: return 400, {"error": "lang must be one of " + ",".join(LANGS)}
             E = env(); E["CLIPPER_LANG"] = d["lang"]; save_env(E)
         return 200, dict(lang=get_lang(), langs=LANGS)
-    if path == "/api/captions":  # Whisper always writes English captions for any speech (Hindi too); the old on/off switch is kept so the page still works, but it cannot turn English off
-        if method == "POST": E = env(); E["CAPTIONS_ENGLISH"] = "1"; save_env(E); cap_env()
-        return 200, dict(english=True)
+    if path == "/api/captions":  # english=true: Whisper writes English captions for any speech (Hindi too); new runs and live hunts. Off = spoken language (Hindi in English letters)
+        if method == "POST": E = env(); E["CAPTIONS_ENGLISH"] = "1" if d.get("english") else "0"; save_env(E); cap_env()
+        return 200, dict(english=env().get("CAPTIONS_ENGLISH") == "1")
     if path == "/api/words" and method == "GET": return 200, reel_words(q.get("run", ""), q.get("file", ""))
     if path == "/api/hunt" and method == "GET":
         lang = q.get("lang") or get_lang(); rows = hunt.hunt(WS, streamers(lang))

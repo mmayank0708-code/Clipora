@@ -7,12 +7,22 @@ for d in glob.glob(os.path.join(sys.prefix, "Lib", "site-packages", "nvidia", "*
 from faster_whisper import WhisperModel
 size = sys.argv[3] if len(sys.argv) > 3 else None
 # names Whisper should know; it also makes Whisper punctuate, which the sentence snapping and caption lines need (Speed test: no full stops -> full sentences)
-TASK = "transcribe" if os.environ.get("TRANSCRIBE_TASK") == "transcribe" else "translate"  # translate = English captions from any speech (Hindi etc.); on by default, TRANSCRIBE_TASK=transcribe keeps the spoken language
+TASK = "translate" if os.environ.get("TRANSCRIBE_TASK") == "translate" else "transcribe"  # transcribe = captions in the spoken language (Hindi comes out in English letters); translate = English captions from any speech, off by default
 VOCAB = os.environ.get("TRANSCRIBE_PROMPT", "GTA 6, Grand Theft Auto VI, GTA 5, San Andreas, Vice City, Leonida, Lucia, Jason, Rockstar, PS5, Xbox, Kai Cenat, IShowSpeed. Chat, KEKW, LUL, W, bro.")  # streamers say "chat" all the time: without it Whisper writes "Chad"
+
+def spoken_language(model, secs=240):
+    """The language of the first few minutes (voice only, silence skipped), so the English word list is used only for English."""
+    p = subprocess.run(["ffmpeg", "-v", "error", "-t", str(secs), "-i", sys.argv[1], "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"], capture_output=True)
+    a = np.frombuffer(p.stdout, np.int16).astype(np.float32) / 32768
+    if len(a) < 16000: return None
+    try: return model.detect_language(a, vad_filter=True, language_detection_segments=4)[0]
+    except Exception: return None  # detection is a courtesy: Whisper still finds the language itself
 
 def run(device, ct):
     model = WhisperModel(size or ("small" if device == "cuda" else "base"), device=device, compute_type=ct)  # base on CPU: ~3x faster, fine for English
-    segs, info = model.transcribe(sys.argv[1], word_timestamps=True, vad_filter=True, initial_prompt=VOCAB, task=TASK)
+    lang = spoken_language(model)
+    prompt = VOCAB if lang == "en" or TASK == "translate" else None  # the English word list throws Whisper off on other languages (Hindi came out as junk symbols)
+    segs, info = model.transcribe(sys.argv[1], word_timestamps=True, vad_filter=True, initial_prompt=prompt, task=TASK, language=lang)
     prog = os.path.splitext(sys.argv[2])[0] + ".progress"  # the app reads this for the real "minutes done / time left": audio seconds done, total, when decoding began
     t0, last, got = time.time(), 0.0, []
     for s in segs:  # pulling the segments here forces the work now, so a missing GPU library fails here, not later
@@ -51,6 +61,11 @@ if __name__ == "__main__":
     except Exception as e: print("GPU not usable (", str(e)[:60], ") -> CPU"); segs, info = run("cpu", "int8")
     data = [dict(start=round(s.start, 2), end=round(s.end, 2), text=s.text.strip(),
                  words=[dict(w=w.word.strip(), s=round(w.start, 2), e=round(w.end, 2)) for w in s.words]) for s in segs]
+    if info.language == "hi" and TASK == "transcribe":  # Whisper writes Hindi in Devanagari; captions get English letters ("kya baat hai")
+        from hindi_roman import roman
+        for sg in data:
+            sg["text"] = roman(sg["text"]); sg["text"] = sg["text"][:1].upper() + sg["text"][1:]
+            for w in sg["words"]: w["w"] = roman(w["w"])
     tags = loud_tags(data, loudness(src))
     off = float(os.environ.get("TRANSCRIBE_OFFSET", 0))  # audio was a window of a long VOD: shift to full-VOD times
     for sg in data: sg["start"] = round(sg["start"] + off, 2); sg["end"] = round(sg["end"] + off, 2); [w.update(s=round(w["s"] + off, 2), e=round(w["e"] + off, 2)) for w in sg["words"]]

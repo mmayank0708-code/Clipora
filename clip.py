@@ -14,7 +14,7 @@ FONT = "Montserrat ExtraBold"
 FONTS = Path(__file__).resolve().parent / "fonts"  # free Google fonts (OFL), shipped with the skill
 FONT_FILE = FONTS / "Montserrat-ExtraBold.ttf"
 # Caption looks. ASS size = em px x the font's (winAscent+winDescent)/unitsPerEm (Anton 1.733, Poppins 1.762).
-# Caption style values: see THIRD_PARTY.md. Keywords stay green in every style.
+# Keywords stay green in every style.
 # name: font file, family, bold, size, CAPS, text, spoken word, outline colour, outline px, shadow, pill behind the spoken word, words per line, y
 STYLES = {
     "classic": ("Montserrat-ExtraBold", FONT, -1, 84, 1, "FFFFFF", "FFE500", "000000", 7, 3, None, 3, 1250),
