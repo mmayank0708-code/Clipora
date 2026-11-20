@@ -1,19 +1,27 @@
 # Free local transcript with word timings (faster-whisper on GPU if present, else CPU), plus loud moments.
 # Usage: python transcribe.py in.m4a out.json [model]     (model default: small on GPU, base on CPU)
-import glob, json, os, subprocess, sys
+import glob, json, os, subprocess, sys, time
 import numpy as np
 for d in glob.glob(os.path.join(sys.prefix, "Lib", "site-packages", "nvidia", "*", "bin")) if os.name == "nt" else []:  # pip CUDA libs (cublas, cudnn) -> GPU
     os.add_dll_directory(d); os.environ["PATH"] = d + os.pathsep + os.environ["PATH"]
 from faster_whisper import WhisperModel
 size = sys.argv[3] if len(sys.argv) > 3 else None
 # names Whisper should know; it also makes Whisper punctuate, which the sentence snapping and caption lines need (Speed test: no full stops -> full sentences)
-TASK = "translate" if os.environ.get("TRANSCRIBE_TASK") == "translate" else "transcribe"  # translate = English captions from any speech (Hindi etc.); off by default
+TASK = "transcribe" if os.environ.get("TRANSCRIBE_TASK") == "transcribe" else "translate"  # translate = English captions from any speech (Hindi etc.); on by default, TRANSCRIBE_TASK=transcribe keeps the spoken language
 VOCAB = os.environ.get("TRANSCRIBE_PROMPT", "GTA 6, Grand Theft Auto VI, GTA 5, San Andreas, Vice City, Leonida, Lucia, Jason, Rockstar, PS5, Xbox, Kai Cenat, IShowSpeed. Chat, KEKW, LUL, W, bro.")  # streamers say "chat" all the time: without it Whisper writes "Chad"
 
 def run(device, ct):
     model = WhisperModel(size or ("small" if device == "cuda" else "base"), device=device, compute_type=ct)  # base on CPU: ~3x faster, fine for English
     segs, info = model.transcribe(sys.argv[1], word_timestamps=True, vad_filter=True, initial_prompt=VOCAB, task=TASK)
-    return list(segs), info  # list() forces the work now, so a missing GPU library fails here, not later
+    prog = os.path.splitext(sys.argv[2])[0] + ".progress"  # the app reads this for the real "minutes done / time left": audio seconds done, total, when decoding began
+    t0, last, got = time.time(), 0.0, []
+    for s in segs:  # pulling the segments here forces the work now, so a missing GPU library fails here, not later
+        got.append(s)
+        if time.time() - last >= 3:
+            last = time.time()
+            try: open(prog + ".tmp", "w").write(json.dumps(dict(done=round(s.end, 1), total=round(info.duration, 1), t0=t0, t=last))); os.replace(prog + ".tmp", prog)
+            except OSError: pass  # progress is a courtesy, never a reason to fail the transcript
+    return got, info
 
 def loudness(path, sr=4000):
     """dB per second of the whole audio, streamed from ffmpeg in chunks (a 6-hour stream stays small in memory)."""
@@ -49,4 +57,6 @@ if __name__ == "__main__":
     json.dump(dict(lang=info.language, segments=data), open(out, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     # compact timeline for the AI to read: one line per segment, loud moments marked
     open(out.replace(".json", ".txt"), "w", encoding="utf-8").write("\n".join(f"[{s['start']:.1f}-{s['end']:.1f}] {s['text']}{tags.get(i, '')}" for i, s in enumerate(data)))
+    try: os.remove(os.path.splitext(out)[0] + ".progress")
+    except OSError: pass
     print("ok", len(data), "segments,", info.language, ",", len(tags), "loud moments")

@@ -516,9 +516,8 @@ def start_job(kind, cmd, envx=None, dry=False, cwd=None, stdin=None, label=""):
     JOBS[jid] = dict(id=jid, kind=kind, label=label, status="running", log=[], t=time.time(), dry=dry)
     threading.Thread(target=run_job, args=(jid, cmd, envx or {}, dry, cwd, stdin), daemon=True).start(); return jid
 
-def cap_env():  # transcribe.py reads TRANSCRIBE_TASK; every run and hunt started by this app inherits it
-    if env().get("CAPTIONS_ENGLISH") == "1": os.environ["TRANSCRIBE_TASK"] = "translate"
-    else: os.environ.pop("TRANSCRIBE_TASK", None)
+def cap_env():  # transcribe.py reads TRANSCRIBE_TASK; every run and hunt started by this app inherits it. Captions are always English (owner, 20 Nov: never Hindi)
+    os.environ["TRANSCRIBE_TASK"] = "translate"
 def peek_file(rid, file):
     run_file(rid, file); p = run_dir(rid).parent / "peek" / (file[3:-4] + ".jpg")
     return p if p.is_file() and WS in p.resolve().parents else None
@@ -531,7 +530,7 @@ def reel_words(rid, file):  # read-only: the spoken words of one reel on the ree
     words = []
     if tp and WS in tp.resolve().parents:
         segs = json.loads(tp.read_text(encoding="utf-8")).get("segments", [])
-        s0 = rj.get("source_start", 0); spans = rj.get("kept_spans") or [[0, rj.get("length", 0)]]; acc = 0; offs = []
+        s0 = rj.get("seg_start", rj.get("source_start", 0)); spans =rj.get("kept_spans") or [[0, rj.get("length", 0)]]; acc = 0; offs = []
         for a, b in spans: offs.append((a, b, acc)); acc += b - a
         for sg in segs:
             for w in sg.get("words", []):
@@ -548,31 +547,69 @@ def audio_secs(p):  # length of a downloaded source, cached; None if ffprobe can
         try: DUR[k] = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(p)], capture_output=True, text=True, timeout=20).stdout.strip())
         except Exception: DUR[k] = None
     return DUR[k]
+def pctile(v, p):  # p-th percentile (0-100) of a sorted list, linear between neighbours
+    k = (len(v) - 1) * p / 100; a = int(k); b = min(a + 1, len(v) - 1); return v[a] + (v[b] - v[a]) * (k - a)
+def span_txt(lo, hi):  # seconds -> "about 3 min" or "about 2-5 min"
+    a, b = max(1, round(lo / 60)), max(1, round(hi / 60)); return f"about {a} min" if a == b else f"about {a}-{b} min"
+def render_secs(c):  # (seconds each finished clip took, exact?). Exact = clip.py's own took_s in the clip's render.json (download + render, no waiting). Older clips have none: fall back to the gap from when the clip could start (its picks file written, or the clip before it done) to its mp4, which also holds waiting time, so it is only rough
+    out = c / "out"
+    if not out.is_dir(): return [], True
+    tk = []
+    for p in out.glob("[0-9][0-9]_*.render.json"):
+        try: tk.append(float(json.loads(p.read_text(encoding="utf-8")).get("took_s") or 0))
+        except Exception: pass
+    tk = [t for t in tk if t > 0]
+    if len(tk) >= 2: return tk, True
+    picks = sorted(p.stat().st_mtime for p in c.glob("picks*.json")); done = sorted(p.stat().st_mtime for p in out.glob("[0-9][0-9]_*.mp4"))
+    gaps, prev = [], 0.0
+    for t in done:
+        t0 = max([prev] + [x for x in picks if x <= t])
+        if t > t0: gaps.append(t - t0)
+        prev = t
+    return gaps, False
+def render_eta(gaps, todo, since):  # (low, high, per-clip high) seconds for `todo` clips left: the middle half of the real clip times in this run; None until 2 clips were timed. `since` = time already spent on the clip in progress
+    if len(gaps) < 2 or not todo: return None
+    g = sorted(gaps); lo, hi = (g[0], g[-1]) if len(g) < 4 else (pctile(g, 25), pctile(g, 75))
+    lo_t = max(0.0, todo * lo - since); return lo_t, max(lo_t, todo * hi - since), hi
 def run_progress(jid):  # read-only: which step a new run is on, judged by the files each step leaves behind
     j = JOBS.get(jid)
     if not j or not j.get("folder"): return dict(error="no such run")
     c = Path(j["folder"]) / "clips"; src, out, now = c / "src", c / "out", time.time()
     audio = [p for p in src.glob("*") if p.suffix.lower() in (".m4a", ".mp3", ".opus", ".webm", ".wav", ".mp4", ".mkv")] if src.is_dir() else []
     trans = [p for p in src.glob("*.json") if not p.name.endswith(".meta.json") and p.name not in ("seen.json", "used.json", "moments.json")] if src.is_dir() else []
-    try: n_pick = len(json.loads((c / "picks.json").read_text(encoding="utf-8")))
-    except Exception: n_pick = 0
-    made = len(list(out.glob("[0-9][0-9]_*.mp4"))) if out.is_dir() else 0
-    qc, st = (out / "qc.json").exists(), j["status"]
+    pks = sorted(c.glob("picks*.json"), key=lambda p: p.stat().st_mtime)  # the newest picks file is the batch being rendered now (re-picks and fixes write picks_b, picks_c ...)
+    try: picks = json.loads(pks[-1].read_text(encoding="utf-8")) if pks else []
+    except Exception: picks = []
+    clips = sorted(out.glob("[0-9][0-9]_*.mp4"), key=lambda p: p.stat().st_mtime) if out.is_dir() else []
+    n_pick, made = len(picks), len(clips)
+    todo = [p for p in picks if p.get("name") not in {x.name[3:-4] for x in clips}]
+    qp, st = out / "qc.json", j["status"]
+    qc = qp.exists() and bool(clips) and qp.stat().st_mtime >= max(x.stat().st_mtime for x in clips) - 1  # a qc.json older than the newest clip belongs to an earlier batch
     fr = [0.0] * 5; note = [""] * 5; left = ""
     if audio: fr[0] = 1
     if audio:
         fr[1] = min(1, len(trans) / len(audio))
         if fr[1] < 1:
             cur = max(audio, key=lambda p: p.stat().st_mtime); secs = audio_secs(cur)
-            if secs:
+            try: pg = json.loads(cur.with_suffix(".progress").read_text(encoding="utf-8"))  # transcribe.py: audio seconds done, total, when decoding began
+            except Exception: pg = None
+            if pg and pg["total"] > 0 and pg["done"] > 0 and now - pg["t"] < 180:  # real count: time left = time spent / share done, measured on this very run
+                share = min(pg["done"] / pg["total"], .99); rem = (pg["t"] - pg["t0"]) * (1 - share) / share
+                fr[1] = (len(trans) + share) / len(audio); left = span_txt(rem, rem) + " left"; note[1] = f"{pg['done'] / 60:.0f} of {pg['total'] / 60:.0f} min of audio transcribed"
+            elif secs:  # no live count yet (model still loading, or an older transcribe.py): a rough guess, said so
                 need = secs * 0.5; done = now - cur.stat().st_mtime  # measured on a laptop RTX 3050: about half the audio length
                 fr[1] = min(.95, (len(trans) + min(done / need, .95)) / len(audio))
-                left = f"about {max(1, round((need - done) / 60))} min left (estimate)" if done < need else "taking longer than usual, still working"
+                left = f"rough guess: {span_txt(need - done, need - done)} left" if done < need else "taking longer than usual, still working"
                 note[1] = f"{round(secs / 60)} min of video"
     if fr[1] >= 1: fr[2] = .5
-    if n_pick: fr[2] = 1; fr[3] = min(1, made / n_pick); note[3] = f"{made} of {n_pick} made"
-    if n_pick and made < n_pick: left = f"about {max(1, round((n_pick - made) * 4.5))} min left (estimate)"
-    if qc or st == "done": fr = [1] * 5; left = ""; note[3] = f"{made} made"
+    if n_pick: fr[2] = 1; fr[3] = (n_pick - len(todo)) / n_pick; note[3] = f"{made} made" + (f", {len(todo)} to go" if todo else "")
+    if todo:  # time left = clips still to render x what clips in this run really took; nothing is shown until 2 clips were timed
+        secs, exact = render_secs(c); last = max([x.stat().st_mtime for x in clips] + [pks[-1].stat().st_mtime]); since = 0 if exact else now - last; eta = render_eta(secs, len(todo), since)  # exact: the clip in progress may be part-done, so the range is a little long, never short
+        left = "time left appears once 2 clips are made" if not eta else f"taking longer than usual ({round(since / 60)} min on this clip), still working" if since > 1.5 * eta[2] else ("" if exact else "rough guess: ") + span_txt(eta[0], eta[1]) + " left"
+    try: q = [x for x in json.loads(qp.read_text(encoding="utf-8")) if (out / x["file"]).exists()]  # report only clips that still exist (a failed one may have been removed)
+    except Exception: q = []
+    if q: bad = [x for x in q if x["status"] == "FAIL"]; note[4] = f"{len(q) - len(bad)} passed" + (f", {len(bad)} failed: " + "; ".join(f"{x['file']} ({', '.join(x['fail'])})" for x in bad) if bad else "")
+    if (qc and not todo) or st == "done": fr = [1] * 5; left = ""; note[3] = f"{made} made" + (f", {len(todo)} not made" if todo else "")
     names = ["Download", "Transcribe", "Pick moments", "Render", "Quality check"]
     w = [10, 40, 15, 30, 5]; pct = round(sum(a * b for a, b in zip(fr, w)))
     act = next((i for i, f in enumerate(fr) if f < 1), None)
@@ -775,9 +812,9 @@ def api56(method, path, q, d):  # -> (code, json) or None when the route is not 
             if d.get("lang") not in LANGS: return 400, {"error": "lang must be one of " + ",".join(LANGS)}
             E = env(); E["CLIPPER_LANG"] = d["lang"]; save_env(E)
         return 200, dict(lang=get_lang(), langs=LANGS)
-    if path == "/api/captions":  # english=true: Whisper writes English captions for any speech (Hindi too); new runs and live hunts
-        if method == "POST": E = env(); E["CAPTIONS_ENGLISH"] = "1" if d.get("english") else "0"; save_env(E); cap_env()
-        return 200, dict(english=env().get("CAPTIONS_ENGLISH") == "1")
+    if path == "/api/captions":  # Whisper always writes English captions for any speech (Hindi too); the old on/off switch is kept so the page still works, but it cannot turn English off
+        if method == "POST": E = env(); E["CAPTIONS_ENGLISH"] = "1"; save_env(E); cap_env()
+        return 200, dict(english=True)
     if path == "/api/words" and method == "GET": return 200, reel_words(q.get("run", ""), q.get("file", ""))
     if path == "/api/hunt" and method == "GET":
         lang = q.get("lang") or get_lang(); rows = hunt.hunt(WS, streamers(lang))

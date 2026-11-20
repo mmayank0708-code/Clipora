@@ -1,7 +1,8 @@
 # One finished Short from a long video: cut -> auto 9:16 -> dead air out -> word-by-word captions + hook title -> loudness -14 LUFS.
 # Usage: python clip.py (src.mp4 or link) transcript.json START END "HOOK TEXT" out.mp4
 # START/END in seconds (or m:ss). Transcript from transcribe.py (word timings). START/END snap to whole sentences.
-import json, os, re, shutil, subprocess, sys
+import json, os, re, shutil, subprocess, sys, time
+T0 = time.time()  # render.json took_s: this Short's own working time (download + render), which the app uses for the real "time left"
 from pathlib import Path
 import numpy as np, cv2
 sys.stdout.reconfigure(encoding="utf-8")  # hooks and paths can carry emoji; a cp1252 pipe would crash the print
@@ -698,7 +699,7 @@ def main(src, tjson, start, end, hook, out, keys="", style="", layout="", opts="
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", v916.name, *extra, "-filter_complex", fg.rstrip(";"), *outs], check=True, cwd=work, timeout=600 + 30 * new_dur)
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "1", "-i", str(out.resolve()), "-frames:v", "1", "-q:v", "2", str(out.with_name(out.stem + "_cover.jpg").resolve())])  # fresh cover (frame at 1 s) for a Short re-cut with clip.py alone
     cut = dur - new_dur - lead
-    json.dump(dict(length=round(new_dur, 2), source_start=round(start + lead, 2), seg_start=round(start, 3), source_end=round(end, 2), kept_spans=[[round(a, 2), round(b, 2)] for a, b in spans], dead_air_cut=round(cut, 2),
+    json.dump(dict(took_s=round(time.time() - T0, 1), length=round(new_dur, 2), source_start=round(start + lead, 2), seg_start=round(start, 3), source_end=round(end, 2), kept_spans=[[round(a, 2), round(b, 2)] for a, b in spans], dead_air_cut=round(cut, 2),
                    longest_talk_free_gap=round(gap_max, 2), thin=bool(backed and gap_max >= 1.0), punch_ins=[[round(float(a), 2), round(float(b), 2)] for a, b in punch], style=style, layout=layout, lang=lang or "", caption_y=int(cap_y(st, pos)), stacked=STACKED,
                    watermark=wmspec, position=pos, aspects=asp, filler_cut=len(fl), black_held=[[round(i / bfps, 2), round((j + 1) / bfps, 2)] for i, j in runs] if frz else []),
               open(out.with_name(out.stem + ".render.json"), "w", encoding="utf-8"), indent=1)  # qc.py reads this
