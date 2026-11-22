@@ -5,9 +5,15 @@ cd "$(dirname "$0")"
 echo; echo "  Clipora - setting up and starting. First time takes 5-15 minutes."; echo
 
 PY=""
-for c in python3.12 python3.11 python3.10 python3 python; do
-  if command -v $c >/dev/null && $c -c 'import sys; sys.exit(0 if (3,9)<=sys.version_info[:2]<=(3,12) else 1)'; then PY=$c; break; fi
-done
+if [ -x .runtime/bin/python ]; then
+  PY="$PWD/.runtime/bin/python"
+  PATH="$PWD/.runtime/bin:$PATH"
+  export PATH
+else
+  for c in python3.12 python3.11 python3.10 python3 python; do
+    if command -v "$c" >/dev/null && "$c" -c 'import sys; sys.exit(0 if (3,9)<=sys.version_info[:2]<=(3,12) else 1)'; then PY=$c; break; fi
+  done
+fi
 if [ -z "$PY" ]; then
   echo "  Python 3.9-3.12 is missing. Mac: brew install python@3.12   Linux: sudo apt install python3 python3-venv"; exit 1
 fi
