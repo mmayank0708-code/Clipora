@@ -1,5 +1,9 @@
 # installed libraries and your own data never go to GitHub
 .venv/
+.runtime/
+.mamba-root/
+.conda-pkgs/
+.tools/
 workspace/
 __pycache__/
 *.pyc
